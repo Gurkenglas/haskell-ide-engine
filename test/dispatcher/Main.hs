@@ -112,7 +112,7 @@ dispatchGhcRequest tn ctx n cin lc plugin com arg = do
 
 dispatchIdeRequest :: (Typeable a, ToJSON a)
                    => TrackingNumber -> String -> TChan (PluginRequest IO)
-                   -> TChan LogVal -> LspId -> IdeResponseT a -> IO ()
+                   -> TChan LogVal -> LspId -> IDErring IdeM a -> IO ()
 dispatchIdeRequest tn ctx cin lc lid f = do
   let
     logger :: (Typeable a, ToJSON a) => RequestCallback IO a

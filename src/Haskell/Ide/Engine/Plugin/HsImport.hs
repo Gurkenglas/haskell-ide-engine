@@ -73,13 +73,13 @@ codeActionProvider docId _ _ context = do
   let J.List diags = context ^. J.diagnostics
       terms = mapMaybe getImportables diags
 
-  res <- lift $ mapM (bimapM return Hoogle.searchModules) terms
+  res <- mapM (bimapM return Hoogle.searchModules) terms
   let actions = mapMaybe (uncurry mkImportAction) (concatTerms res)
 
   if null actions
      then do
        let relaxedTerms = map (bimap id (head . T.words)) terms
-       relaxedRes <- lift $ mapM (bimapM return Hoogle.searchModules) relaxedTerms
+       relaxedRes <- mapM (bimapM return Hoogle.searchModules) relaxedTerms
        return $ mapMaybe (uncurry mkImportAction) (concatTerms relaxedRes)
      else return actions
 

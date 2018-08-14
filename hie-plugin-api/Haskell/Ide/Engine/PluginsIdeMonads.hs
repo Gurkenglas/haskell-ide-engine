@@ -39,10 +39,6 @@ module Haskell.Ide.Engine.PluginsIdeMonads
   , IDErring(..)
   , runIDErring
   , MonadIde(..)
-  , IdeResponseT
-  , ResponseT
---  , IdeResponse
-  , IdeDefer(..)
   , IdeM
   , IdeError(..)
   , IdeErrorCode(..)
@@ -62,21 +58,24 @@ module Haskell.Ide.Engine.PluginsIdeMonads
   , List(..)
   , IDErrs(..)
   , defer
-  , moduleCache, requestQueue, idePlugins, extensibleState, ghcSession
+  , getModuleMVar
+  , fromIDErring
+  , modules, idePlugins, extensibleState, ghcSession
   ) where
 
+import           System.Directory
 import           Control.Concurrent.STM
+import           Control.Concurrent.MVar.Lifted
 import           Control.Monad.IO.Class
 import           Control.Monad.Reader
 import           Control.Monad.Except
 import           Control.Monad.State
-import           Control.Monad.Trans.Free
+import           Control.Monad.Trans.Maybe
 import           Control.Monad.Trans.Control
 import           Control.Monad.Morph
 import           Control.Monad.Base
 import           Control.Lens
 import           Exception
-import           Data.Functor.Classes
 
 import           Data.Aeson
 import           Data.Dynamic (Dynamic)
@@ -129,9 +128,9 @@ type CodeActionProvider =  VersionedTextDocumentIdentifier
                         -> Maybe FilePath -- ^ Project root directory
                         -> Range
                         -> CodeActionContext
-                        -> IdeResponseT [CodeAction]
+                        -> IDErring IdeM [CodeAction]
 
--- type DiagnosticProviderFunc = DiagnosticTrigger -> Uri -> IdeResponseT (Map.Map Uri (S.Set Diagnostic)))
+-- type DiagnosticProviderFunc = DiagnosticTrigger -> Uri -> IDErring IdeM (Map.Map Uri (S.Set Diagnostic)))
 type DiagnosticProviderFunc
   = DiagnosticTrigger -> Uri -> IDErring IdeGhcM (Map.Map Uri (S.Set Diagnostic))
 
@@ -145,9 +144,9 @@ data DiagnosticTrigger = DiagnosticOnOpen
                        | DiagnosticOnSave
                        deriving (Show,Ord,Eq)
 
-type HoverProvider = Uri -> Position -> IdeResponseT [Hover]
+type HoverProvider = Uri -> Position -> IDErring IdeM [Hover]
 
-type SymbolProvider = Uri -> IdeResponseT [DocumentSymbol]
+type SymbolProvider = Uri -> IDErring IdeM [DocumentSymbol]
 
 data PluginDescriptor =
   PluginDescriptor { pluginName               :: T.Text
@@ -194,8 +193,6 @@ instance GM.GmState m => GM.GmState (IDErring m) where
   gmsGet = lift GM.gmsGet
   gmsPut = lift . GM.gmsPut
   gmsState = lift . GM.gmsState
-instance (Functor f, MonadFree f m) => MonadFree f (IDErring m) where
-  wrap x = liftWith (\run -> wrap $ fmap run x) >>= restoreT . return
 
 runIDErring :: IDErring m a -> m (Either IdeError a)
 runIDErring = runExceptT . getIDErring
@@ -214,31 +211,14 @@ type IdeM = ReaderT ClientCapabilities (MultiThreadState IdeState)
 class Monad m => MonadIde m where liftIde :: IdeM a -> m a
 instance MonadIde IdeGhcM where liftIde = lift . lift
 instance MonadIde m => MonadIde (IDErring m) where liftIde = lift . liftIde
-instance MonadIde m => MonadIde (ResponseT m) where liftIde = lift . liftIde
 instance MonadIde IdeM where liftIde = id
 
 data IdeState = IdeState
-  { _moduleCache :: GhcModuleCache
-  -- | A queue of requests to be performed once a module is loaded
-  , _requestQueue :: Map.Map FilePath [Either T.Text CachedModule -> IdeM ()]
+  { _modules :: GhcModuleCache
   , _idePlugins  :: IdePlugins
   , _extensibleState :: !(Map.Map TypeRep Dynamic)
   , _ghcSession  :: Maybe (IORef HscEnv)
   }
-
--- | The IDE response, which wraps around an (Either IdeError a) that may be deferred.
--- Used mostly in IdeM.
-data IdeDefer a = IdeDefer FilePath (Either T.Text CachedModule -> a) deriving Functor
-type ResponseT = FreeT IdeDefer
-type IdeResponseT = ResponseT (IDErring IdeM) -- Lightens error messages
-
-instance GM.MonadIO m => GM.MonadIO (ResponseT m) where liftIO = lift . GM.liftIO
-
-defer :: (IDErrs m, MonadFree IdeDefer m) => FilePath -> (CachedModule -> m a) -> m a
-defer fp f = wrap $ IdeDefer fp $ either (\err -> ideError NoModuleAvailable err Null) f
-
-instance Show1 IdeDefer where liftShowsPrec _ _ _ (IdeDefer fp _) = (++) $ "Deferred response waiting on " ++ fp
-instance Show (IdeDefer a) where show (IdeDefer fp _) = "Deferred response waiting on " ++ fp
 
 -- | Error codes. Add as required
 data IdeErrorCode
@@ -269,6 +249,22 @@ data IdeError = IdeError
 instance ToJSON IdeError
 instance FromJSON IdeError
 
+makeLenses ''IdeState
+
+getModuleMVar :: FilePath -> IdeM (MVar UriCache)
+getModuleMVar fp = do
+  fp' <- liftIO $ canonicalizePath fp
+  mmvar <- use $ modules . uriCaches . at fp'
+  (\x -> maybe x pure mmvar) $ do
+    mvar <- newEmptyMVar
+    modules . uriCaches . at fp' <?= mvar
+
+defer :: (MonadIde m, IDErrs m, MonadBase IO m) => FilePath -> m UriCache
+defer = liftIde . getModuleMVar >=> readMVar
+
+fromIDErring :: Monad m => (IdeError -> m a) -> IDErring m a -> m a
+fromIDErring f = runIDErring >=> either f pure
+
 class Monad m => IDErrs m where
   ideError :: IdeErrorCode -> T.Text -> Value -> m a
   default ideError :: (IDErrs n, MonadTrans t, m ~ t n) => IdeErrorCode -> T.Text -> Value -> m a
@@ -277,29 +273,7 @@ class Monad m => IDErrs m where
 instance Monad m => IDErrs (IDErring m) where
   ideError c m i = IDErring $ throwError $ IdeError c m i
 
-instance IDErrs m => IDErrs (ResponseT m)
-
-makeLenses ''IdeState
-
-instance HasGhcModuleCache IdeM where
-  getModuleCache = do
-    tvar <- lift ask
-    liftIO $ view moduleCache <$> readTVarIO tvar
-  setModuleCache mc = do
-    tvar <- lift ask
-    liftIO $ atomically $ modifyTVar' tvar $ moduleCache .~ mc
-
-instance HasGhcModuleCache IdeGhcM where
-  getModuleCache = lift . lift $ getModuleCache
-  setModuleCache = lift . lift . setModuleCache
-
-instance HasGhcModuleCache m => HasGhcModuleCache (IDErring m) where
-  getModuleCache = lift getModuleCache
-  setModuleCache = lift . setModuleCache
-
-instance HasGhcModuleCache m => HasGhcModuleCache (ResponseT m) where
-  getModuleCache = lift getModuleCache
-  setModuleCache = lift . setModuleCache
+instance IDErrs m => IDErrs (MaybeT m)
 
 instance (MonadIO m, MonadBaseControl IO m) => ExceptionMonad (IDErring m) where
   gcatch act handler = control $ \run ->
@@ -307,8 +281,3 @@ instance (MonadIO m, MonadBaseControl IO m) => ExceptionMonad (IDErring m) where
 
   gmask = liftBaseOp gmask . liftRestore
     where liftRestore f r = f $ liftBaseOp_ r
-
-instance ExceptionMonad m => ExceptionMonad (ResponseT m) where
-  gcatch act handler = let levelonecatch act' handler' = FreeT $ runFreeT act' `gcatch` (runFreeT . handler') in
-    (`levelonecatch` handler) . FreeT . (fmap . fmap) (`gcatch` handler) . runFreeT $ act -- afaic we previously only did one level!
-  gmask = error "ResponseT hasn't defined gmask!"

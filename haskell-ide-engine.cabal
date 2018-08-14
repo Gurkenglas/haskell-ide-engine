@@ -58,7 +58,6 @@ library
                      , data-default
                      , directory
                      , filepath
-                     , free
                      , ghc >= 8.0.1
                      , ghc-exactprint
                      , ghc-mod >= 5.9.0.0
@@ -165,7 +164,6 @@ test-suite unit-test
                      , containers
                      , directory
                      , filepath
-                     , free
                      , haskell-lsp
                      , haskell-ide-engine
                      -- , hie-test-utils

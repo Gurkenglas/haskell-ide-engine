@@ -175,13 +175,14 @@ liquidFileFor uri ext =
 
 -- ---------------------------------------------------------------------
 
--- type HoverProvider = Uri -> Position -> IdeResponseT Hover
+-- type HoverProvider = Uri -> Position -> IDErring IdeM Hover
 
 hoverProvider :: HoverProvider
 hoverProvider uri pos = do
   file <- pluginGetFile "Liquid.hoverProvider: " uri
-  withCachedModuleAndDataDefault file (Just (return [])) $
-    \cm () -> do
+  either (const $ return []) provide fetchCachedModuleEither file
+  where
+    provide cm = do
       merrs <- liftIO $ readVimAnnot uri
       case merrs of
         Nothing -> return []

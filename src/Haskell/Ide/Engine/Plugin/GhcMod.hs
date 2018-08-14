@@ -516,8 +516,10 @@ hoverProvider doc pos = do
 data Decl = Decl LSP.SymbolKind (Located RdrName) [Decl]
           | Import LSP.SymbolKind (Located ModuleName) [Decl]
 
-symbolProvider :: Uri -> IdeResponseT [LSP.DocumentSymbol]
-symbolProvider uri = pluginGetFile "ghc-mod symbolProvider: " uri >>= \file -> withCachedModule file $ \cm -> do
+symbolProvider :: Uri -> IDErring IdeM [LSP.DocumentSymbol]
+symbolProvider uri = do
+  file <- pluginGetFile "ghc-mod symbolProvider: " uri
+  cm <- fetchCachedModule file
   let tm = tcMod cm
       hsMod = unLoc $ pm_parsed_source $ tm_parsed_module tm
       imports = hsmodImports hsMod

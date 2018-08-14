@@ -37,7 +37,7 @@ handleCodeActionReq tn req = do
   docVersion <- fmap _version <$> liftIO (vfsFunc docUri)
   let docId = J.VersionedTextDocumentIdentifier docUri docVersion
 
-  let getProviders :: IdeResponseT [CodeActionProvider]
+  let getProviders :: IDErring IdeM [CodeActionProvider]
       getProviders = do
         IdePlugins m <- use idePlugins
         return $ mapMaybe pluginCodeActionProvider $ toList m

@@ -1,9 +1,12 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Haskell.Ide.Engine.GhcModuleCache where
 
+import           Control.Concurrent.MVar.Lifted
+import           Control.Lens.TH
 import qualified Data.Text as T
 import qualified Data.Map as Map
 import           Data.Dynamic (Dynamic)
@@ -17,13 +20,14 @@ import Haskell.Ide.Engine.ArtifactMap
 
 import Language.Haskell.LSP.Types
 
-type UriCaches = Map.Map FilePath UriCache
+type UriCaches = Map.Map FilePath (MVar UriCache)
+type UriCache = Either T.Text UriCacheFound
 
-data UriCache = UriCache
-  { cachedModule :: !CachedModule
-  , cachedData   :: !(Map.Map TypeRep Dynamic)
-  , isStale      :: !Bool
-  } | UriCacheFailed T.Text deriving Show
+data UriCacheFound = UriCacheFound
+  { _cachedModule :: !CachedModule
+  , _cachedData   :: !(Map.Map TypeRep Dynamic)
+  , _isStale      :: !Bool
+  }
 
 data CachedModule = CachedModule
   { tcMod          :: !TypecheckedModule
@@ -52,17 +56,11 @@ getThingsAtPos cm pos ts =
 -- ---------------------------------------------------------------------
 -- The following to move into ghc-mod-core
 
-class (Monad m) => HasGhcModuleCache m where
-  getModuleCache :: m GhcModuleCache
-  setModuleCache :: GhcModuleCache -> m ()
-
-emptyModuleCache :: GhcModuleCache
-emptyModuleCache = GhcModuleCache Map.empty Map.empty
-
 data GhcModuleCache = GhcModuleCache
-  { cradleCache :: !(Map.Map FilePath GM.Cradle)
+  { _cradleCache :: !(Map.Map FilePath GM.Cradle)
               -- ^ map from dirs to cradles
-  , uriCaches  :: !UriCaches
-  } deriving (Show)
-
+  , _uriCaches  :: !UriCaches
+  }
+makeLenses ''GhcModuleCache
+makeLenses ''UriCacheFound
 -- ---------------------------------------------------------------------

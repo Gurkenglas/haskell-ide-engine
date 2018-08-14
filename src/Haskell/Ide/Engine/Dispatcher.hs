@@ -19,7 +19,6 @@ import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Reader
 import           Control.Monad.STM
-import           Control.Monad.Trans.Free
 import           Data.Foldable
 import qualified Data.Aeson                              as J
 import qualified Data.Text                               as T
@@ -85,45 +84,32 @@ ideDispatcher env errorHandler callbackHandler pin = forever $ do
   debugm "ideDispatcher: top of loop"
   IdeRequest tn lid callback action <- liftIO $ atomically $ readTChan pin
   debugm $ "ideDispatcher: got request " ++ show tn ++ " with id: " ++ show lid
-  iterT (\(IdeDefer fp cacheCb) -> requestQueue . at fp . non' _Empty %= (:) cacheCb)
-    $ hoistFreeT' (\layer -> do
-      result <- runIDErring layer
-      liftIO $ case result of 
-        Right noerr -> return noerr
-        Left err -> do
-          completedReq env lid
-          Pure <$> handleError (errorHandler lid) err
-    ) $ do
-      checkCancelled env lid
-      success <- action
-      checkCancelled env lid
-      completedReq env lid
-      liftIO $ callbackHandler callback success
-
-hoistFreeT' :: (forall f a. IDErring IdeM (FreeF f () a) -> IdeM (FreeF f () a)) -> IdeResponseT () -> ResponseT IdeM ()
-hoistFreeT' mh = FreeT . mh . fmap (fmap (hoistFreeT' mh)) . runFreeT
+  forkIO $ -- Wait until the first defer before going back to the top of the loop?
+    handleIDErring errorHandler callbackHandler id lid action
 
 ghcDispatcher :: forall void m. DispatcherEnv -> ErrorHandler -> CallbackHandler m -> TChan (GhcRequest m) -> GM.GhcModT IdeM void
 ghcDispatcher env@DispatcherEnv{docVersionTVar} errorHandler callbackHandler pin = forever $ do
   debugm "ghcDispatcher: top of loop"
   GhcRequest tn context mver mid callback action <- liftIO $ atomically $ readTChan pin
   debugm $ "ghcDispatcher:got request " ++ show tn ++ " with id: " ++ show mid
-  result <- runIDErring $ do
-    for_ mid $ \lid -> do
-      completedReq env lid
-      checkCancelled env lid
-    for_ mver $ \(uri, reqver) -> do
-      curver <- liftIO $ atomically $ Map.lookup uri <$> readTVar docVersionTVar
-      when (Just reqver /= curver) $
-        ideError VersionMismatch "The request expects another version" J.Null
-    let c = uriToFilePath <$> context
-    when (c == Just Nothing) $ debugm "ghcDispatcher:Got malformed uri, running action with default context"
-    runActionWithContext (join c) action
-  liftIO $ case result of
+  handleIDErring errorHandler callbackHandler
+    (maybe $ debugm $ "ghcDispatcher:Got error for a request: " ++ show err) mid $ do
+      for_ mid $ \lid -> do
+        completedReq env lid
+        checkCancelled env lid
+      for_ mver $ \(uri, reqver) -> do
+        curver <- liftIO $ atomically $ Map.lookup uri <$> readTVar docVersionTVar
+        when (Just reqver /= curver) $
+          ideError VersionMismatch "The request expects another version" J.Null
+      let c = uriToFilePath <$> context
+      when (c == Just Nothing) $ debugm "ghcDispatcher:Got malformed uri, running action with default context"
+      runActionWithContext (join c) action
+
+handleIDErring errorHandler callbackHandler f mlid action = do
+  result <- runIDErring m
+  liftIO $ case result of 
     Right x -> callbackHandler callback x
-    Left err -> case mid of
-      Just lid -> handleError (errorHandler lid) err
-      Nothing -> debugm $ "ghcDispatcher:Got error for a request: " ++ show err
+    Left err -> f (handleError . errorHandler) mlid err
 
 handleError :: (J.ErrorCode -> T.Text -> a) -> IdeError -> a
 handleError handler (IdeError code msg _) = handler (translate code) msg where

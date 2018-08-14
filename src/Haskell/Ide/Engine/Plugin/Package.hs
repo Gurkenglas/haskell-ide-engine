@@ -235,10 +235,8 @@ codeActionProvider docId mRootDir _ context = do
   let J.List diags = context ^. J.diagnostics
       pkgs = mapMaybe getAddablePackages diags
 
-  res <- lift $ mapM (bimapM return Hoogle.searchPackages) pkgs
-  let actions = mapMaybe (uncurry mkAddPackageAction) (concatPkgs res)
-
-  return actions
+  res <- mapM (bimapM return Hoogle.searchPackages) pkgs
+  return $ mapMaybe (uncurry mkAddPackageAction) (concatPkgs res)
 
   where
     concatPkgs = concatMap (\(d, ts) -> map (d,) ts)
